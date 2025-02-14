@@ -69,7 +69,7 @@ class Qwen2VL:
     RETURN_TYPES = ("STRING",)
     FUNCTION = "inference"
     CATEGORY = "Comfyui_QwenVL"
-
+    
     def inference(
         self,
         text,
@@ -81,113 +81,151 @@ class Qwen2VL:
         seed,
         image=None,
     ):
+        # --------------------------
+        # 1. 初始化设置
+        # --------------------------
+        # 设置随机种子（如果指定）
         if seed != -1:
             torch.manual_seed(seed)
+        
+        # 模型路径配置
         model_id = f"qwen/{model}"
-        # put downloaded model to model/LLM dir
         self.model_checkpoint = os.path.join(
             folder_paths.models_dir, "LLM", os.path.basename(model_id)
         )
-
+    
+        # --------------------------
+        # 2. 模型下载与加载
+        # --------------------------
+        # 如果本地没有模型则自动下载
         if not os.path.exists(self.model_checkpoint):
             from huggingface_hub import snapshot_download
-
             snapshot_download(
                 repo_id=model_id,
                 local_dir=self.model_checkpoint,
                 local_dir_use_symlinks=False,
             )
-
+    
+        # 初始化图像处理器（首次运行时加载）
         if self.processor is None:
-            # Define min_pixels and max_pixels:
-            # Images will be resized to maintain their aspect ratio
-            # within the range of min_pixels and max_pixels.
-            min_pixels = 256*28*28
-            max_pixels = 1024*28*28 
-
             self.processor = AutoProcessor.from_pretrained(
                 self.model_checkpoint,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
+                min_pixels=256*28*28,  # 图像最小分辨率
+                max_pixels=1024*28*28  # 图像最大分辨率
             )
-
+    
+        # 初始化模型（首次运行时加载）
         if self.model is None:
-            # Load the model on the available device(s)
+            # 量化配置
+            quantization_config = None
             if quantization == "4bit":
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                )
+                quantization_config = BitsAndBytesConfig(load_in_4bit=True)
             elif quantization == "8bit":
-                quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,
-                )
-            else:
-                quantization_config = None
-
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+    
+            # 加载模型到GPU
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_checkpoint,
                 torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
                 device_map="auto",
                 quantization_config=quantization_config,
-            )    with torch.no_grad():
+            )
+    
+        # --------------------------
+        # 3. 处理输入数据
+        # --------------------------
         messages_list = []
+        
         if torch.is_tensor(image):
+            # 获取输入图像的批次数量
             batch_size = image.shape[0]
+            
+            # 将每个图像转换为PIL格式
             pil_images = [tensor_to_pil(image, i) for i in range(batch_size)]
-            for pil_image in pil_images:
+            
+            # 为每个图像创建独立的消息
+            for img in pil_images:
                 messages_list.append({
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": pil_image},
+                        {"type": "image", "image": img},
                         {"type": "text", "text": text}
                     ]
                 })
         else:
+            # 无图像输入的默认消息
             messages_list.append({
                 "role": "user",
                 "content": [{"type": "text", "text": text}]
             })
-
-        # 批量处理所有消息
-        texts = [self.processor.apply_chat_template([msg], tokenize=False, add_generation_prompt=True) 
-                 for msg in messages_list]
-        image_inputs, video_inputs = process_vision_info(messages_list)
-
-        inputs = self.processor(
-            text=texts,
-            images=image_inputs,
-            videos=video_inputs,
-            padding=True,
-            return_tensors="pt"
-        ).to("cuda")
-
+    
+        # --------------------------
+        # 4. 批量推理处理
+        # --------------------------
         try:
+            # 生成对话模板
+            texts = [
+                self.processor.apply_chat_template(
+                    [msg], 
+                    tokenize=False, 
+                    add_generation_prompt=True
+                ) 
+                for msg in messages_list
+            ]
+            
+            # 处理视觉输入（图像/视频）
+            image_inputs, video_inputs = process_vision_info(messages_list)
+            
+            # 准备模型输入
+            inputs = self.processor(
+                text=texts,
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt"
+            ).to("cuda")
+    
+            # 执行模型推理
             generated_ids = self.model.generate(
-                **inputs, max_new_tokens=max_new_tokens
+                **inputs, 
+                max_new_tokens=max_new_tokens,
+                temperature=temperature
             )
+            
+            # 修剪生成结果
             generated_ids_trimmed = [
                 out_ids[len(in_ids):] 
                 for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
             ]
+            
+            # 解码生成结果
             results = self.processor.batch_decode(
                 generated_ids_trimmed,
                 skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-                temperature=temperature,
+                clean_up_tokenization_spaces=False
             )
-            final_result = "\n".join(results)  # 合并多个结果
+            
+            # 合并多个结果
+            final_result = "\n----------------\n".join([
+                f"Result {i+1}:\n{res}" 
+                for i, res in enumerate(results)
+            ])
+            
         except Exception as e:
-            return (f"Error during model inference: {str(e)}",)
-
-            if not keep_model_loaded:
-                del self.processor
-                del self.model
-                self.processor = None
-                self.model = None
-                torch.cuda.empty_cache()
-                torch.cuda.ipc_collect()
-
-            return final_result
+            return (f"Error during inference: {str(e)}",)
+    
+        # --------------------------
+        # 5. 清理资源
+        # --------------------------
+        if not keep_model_loaded:
+            del self.processor
+            del self.model
+            self.processor = None
+            self.model = None
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    
+        return (final_result,)
 
 
 class Qwen2:
