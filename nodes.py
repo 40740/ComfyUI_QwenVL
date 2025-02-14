@@ -129,62 +129,55 @@ class Qwen2VL:
                 torch_dtype=torch.bfloat16 if self.bf16_support else torch.float16,
                 device_map="auto",
                 quantization_config=quantization_config,
+            )    with torch.no_grad():
+        messages_list = []
+        if torch.is_tensor(image):
+            batch_size = image.shape[0]
+            pil_images = [tensor_to_pil(image, i) for i in range(batch_size)]
+            for pil_image in pil_images:
+                messages_list.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": pil_image},
+                        {"type": "text", "text": text}
+                    ]
+                })
+        else:
+            messages_list.append({
+                "role": "user",
+                "content": [{"type": "text", "text": text}]
+            })
+
+        # 批量处理所有消息
+        texts = [self.processor.apply_chat_template([msg], tokenize=False, add_generation_prompt=True) 
+                 for msg in messages_list]
+        image_inputs, video_inputs = process_vision_info(messages_list)
+
+        inputs = self.processor(
+            text=texts,
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt"
+        ).to("cuda")
+
+        try:
+            generated_ids = self.model.generate(
+                **inputs, max_new_tokens=max_new_tokens
             )
-
-        with torch.no_grad():
-            if torch.is_tensor(image):
-                pil_image = tensor_to_pil(image)
-
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "image": pil_image,
-                            },
-                            {"type": "text", "text": text},
-                        ],
-                    }
-                ]
-            else:
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": text},
-                        ],
-                    }
-                ]
-
-            text = self.processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+            generated_ids_trimmed = [
+                out_ids[len(in_ids):] 
+                for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+            ]
+            results = self.processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+                temperature=temperature,
             )
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = self.processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            ).to("cuda")
-
-            try:
-                generated_ids = self.model.generate(
-                    **inputs, max_new_tokens=max_new_tokens
-                )
-                generated_ids_trimmed = [
-                    out_ids[len(in_ids) :]
-                    for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
-                ]
-                result = self.processor.batch_decode(
-                    generated_ids_trimmed,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
-                    temperature=temperature,
-                )
-            except Exception as e:
-                return (f"Error during model inference: {str(e)}",)
+            final_result = "\n".join(results)  # 合并多个结果
+        except Exception as e:
+            return (f"Error during model inference: {str(e)}",)
 
             if not keep_model_loaded:
                 del self.processor
@@ -194,7 +187,7 @@ class Qwen2VL:
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
-            return result
+            return final_result
 
 
 class Qwen2:
