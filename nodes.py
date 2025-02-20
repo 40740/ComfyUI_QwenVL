@@ -1,5 +1,6 @@
 import os
 import torch
+import json
 from transformers import (
     Qwen2_5_VLForConditionalGeneration,
     AutoModelForCausalLM,
@@ -71,8 +72,10 @@ class Qwen2VL:
                 "image": ("IMAGE",),
             },
         }
-
-    RETURN_TYPES = ("STRING",)
+ 
+    
+    RETURN_TYPES = ("STRING","STRING",)      # 保持基础类型为字符串
+    OUTPUT_IS_LIST = (False,True,)  
     FUNCTION = "inference"
     CATEGORY = "Comfyui_QwenVL"
     
@@ -237,11 +240,9 @@ class Qwen2VL:
                 )[0]
                 
                 results.append(result)
-
-            # 格式化最终输出
-            final_result = "\n----------------\n".join([
-                f"结果 {i+1}:\n{res}" for i, res in enumerate(results)
-            ])
+                
+ 
+            
 
         except Exception as e:
             return (f"推理过程中出错: {str(e)}",)
@@ -255,9 +256,9 @@ class Qwen2VL:
                 self.model = None
                 torch.cuda.empty_cache()
             except:
-                pass
-
-        return (final_result,)
+                pass 
+          
+        return (results, results)  # 第二个输出直接返回列表
 
 
 class Qwen2:
@@ -305,9 +306,10 @@ class Qwen2:
                 ),
                 "seed": ("INT", {"default": -1}),
             },
-        }
-
-    RETURN_TYPES = ("STRING",)
+        } 
+        
+    RETURN_TYPES = ("STRING","STRING",)      # 保持基础类型为字符串
+    OUTPUT_IS_LIST = (False,True,) 
     FUNCTION = "inference"
     CATEGORY = "Comfyui_QwenVL"
 
@@ -383,6 +385,8 @@ class Qwen2:
                 clean_up_tokenization_spaces=False,
                 temperature=temperature,
             )
+            
+             
 
             if not keep_model_loaded:
                 del self.tokenizer
@@ -392,4 +396,5 @@ class Qwen2:
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
-            return result
+             
+            return (result, result)  # 第二个输出直接返回原始列表
